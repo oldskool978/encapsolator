@@ -125,7 +125,8 @@ while ($Step -lt 5) {
                 "Standard Application (No Machine Learning)",
                 "NVIDIA CUDA 12.1 (PyTorch Default)",
                 "NVIDIA CUDA 11.8 (Legacy Compute)",
-                "AMD ROCm Nightly (GFX120X/HIP)",
+                "Intel OneAPI XPU (Arc/Core Ultra)",
+                "AMD ROCm Nightly (Dynamic LLVM/HIP)",
                 "Agnostic / CPU Fallback",
                 $BackOpt,
                 $ExitOpt
@@ -138,7 +139,8 @@ while ($Step -lt 5) {
                 "Standard Application (No Machine Learning)" { $SelectedProfile = "STANDARD" }
                 "NVIDIA CUDA 12.1 (PyTorch Default)" { $SelectedProfile = "CUDA_12" }
                 "NVIDIA CUDA 11.8 (Legacy Compute)" { $SelectedProfile = "CUDA_11" }
-                "AMD ROCm Nightly (GFX120X/HIP)" { $SelectedProfile = "ROCM" }
+                "Intel OneAPI XPU (Arc/Core Ultra)" { $SelectedProfile = "INTEL_XPU" }
+                "AMD ROCm Nightly (Dynamic LLVM/HIP)" { $SelectedProfile = "ROCM" }
                 "Agnostic / CPU Fallback" { $SelectedProfile = "CPU" }
             }
         }
@@ -274,7 +276,7 @@ if ($PipCommands.Count -gt 0) {
     $ConstraintsFile = Join-Path $WorkingRoot "constraints.txt"
     $TempFreeze = Join-Path $WorkingRoot "constraints_tmp.txt"
     Invoke-Strict { & cmd.exe /c "`"$PythonExe`" -m pip freeze > `"$TempFreeze`"" }
-    Get-Content -Path $TempFreeze | Where-Object { $_ -match "^torch" } | Set-Content -Path $ConstraintsFile -Force
+    Get-Content -Path $TempFreeze | Where-Object { $_ -match "^(torch|rocm|intel|triton|xformers)" } | Set-Content -Path $ConstraintsFile -Force
     Remove-Item $TempFreeze -Force
 
     if (Test-Path $RequirementsPath) {
@@ -291,42 +293,35 @@ if ($PipCommands.Count -gt 0) {
 Write-Host "`nInitializing Phase 4: Polymorphic AST Encapsulation..." -ForegroundColor Yellow
 Invoke-Strict { & $PythonExe -m pip install pyinstaller --no-cache-dir --no-warn-script-location }
 
-Write-Host "[INFO] Autonomously harvesting dynamic software dependencies..." -ForegroundColor DarkGray
+Write-Host "[INFO] Autonomously harvesting deterministic AST dependency graph..." -ForegroundColor DarkGray
 $HarvesterPath = Join-Path $WorkingRoot "harvester.py"
+$TargetScriptPathEscaped = (Join-Path $WorkingRoot $TargetScript) -replace '\\', '\\'
 $HarvesterContent = @"
-import os
 import sys
-import importlib.metadata as metadata
+import os
+from modulefinder import ModuleFinder
 
-reqs = set()
-req_path = os.path.join(r'$($WorkingRoot -replace '\\', '\\\\')', 'requirements.txt')
-if os.path.exists(req_path):
-    with open(req_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            # Defensively split away operators and package [extras]
-            req = line.split('==')[0].split('>=')[0].split('~=')[0].split('<')[0].split('>')[0].split('[')[0].strip().lower()
-            if req:
-                reqs.add(req)
+# Establish deterministic resolution bound to the hermetic site-packages
+site_packages = [p for p in sys.path if 'site-packages' in p]
+entry_point = r'$TargetScriptPathEscaped'
 
-imports_to_collect = set()
-for dist in metadata.distributions():
-    dist_name = dist.metadata.get('Name')
-    if dist_name and dist_name.lower() in reqs:
-        top_level_txt = dist.read_text('top_level.txt')
-        if top_level_txt:
-            for tl in top_level_txt.splitlines():
-                if tl.strip():
-                    imports_to_collect.add(tl.strip())
-        else:
-            imports_to_collect.add(dist_name.replace('-', '_'))
+finder = ModuleFinder(path=sys.path)
+try:
+    finder.run_script(entry_point)
+except Exception:
+    pass # Tolerate syntax anomalies in unexecuted branches during AST trace
 
-print(';'.join(imports_to_collect))
+dynamic_imports = set()
+for name, mod in finder.modules.items():
+    if mod.__file__ and any(sp in mod.__file__ for sp in site_packages):
+        base_name = name.split('.')[0]
+        if base_name not in ['_distutils_hack', 'pkg_resources', 'pip', 'setuptools', 'wheel']:
+            dynamic_imports.add(base_name)
+
+print(';'.join(dynamic_imports))
 "@
 Set-Content -Path $HarvesterPath -Value $HarvesterContent -Force
-$DynamicPkgsRaw = & $PythonExe $HarvesterPath
+$DynamicPkgsRaw = (& $PythonExe $HarvesterPath | Out-String).Trim()
 Remove-Item $HarvesterPath -Force
 
 $CollectAllPkgs = @($Config.PyInstallerCollectAll)
@@ -335,7 +330,7 @@ if ($DynamicPkgsRaw) {
     foreach ($pkg in $DynamicPkgs) {
         if ($pkg -notin $CollectAllPkgs) {
             $CollectAllPkgs += $pkg
-            Write-Host " -> Dynamic Target Locked: $pkg" -ForegroundColor DarkCyan
+            Write-Host " -> AST Node Resolved: $pkg" -ForegroundColor DarkCyan
         }
     }
 }
@@ -378,41 +373,50 @@ $HookPath = Join-Path $WorkingRoot "runtime_hook.py"
 $HookContent = @"
 import os
 import sys
+import ctypes
 
-# Abstracted Base Directory Resolution (Invariant to OneDir/OneFile topologies)
+# Phase 1: Host Environment Annihilation
+for key in ('PYTHONHOME', 'PYTHONPATH', 'PEP_582_PACKAGES'):
+    os.environ.pop(key, None)
+
+# Abstracted Base Directory Resolution
 base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 
-# Pre-Ctypes Stage: Strict Host Path Sanitization with Quote Stripping
+# Phase 2: sys.path truncation locking execution to the payload namespace
+sys.path = [
+    p for p in sys.path 
+    if p.startswith(base_dir) or 'base_library.zip' in p
+]
+
+# Phase 3: Strict Host Path Sanitization with Quote Stripping
 if 'PATH' in os.environ:
     clean_paths = []
     for path_segment in os.environ['PATH'].split(os.pathsep):
         path_segment = path_segment.replace('"', '').strip()
         if not path_segment:
             continue
+        
         norm_seg = os.path.normpath(path_segment).lower()
-        bad_words = [r'\python', r'\conda', r'\miniconda', r'\rocm', r'\cuda']
-        if not any(bad in norm_seg for bad in bad_words):
+        if not any(bad in norm_seg for bad in (r'\python', r'\conda', r'\miniconda', r'\rocm', r'\cuda', r'appdata\roaming')):
             clean_paths.append(path_segment)
+    
     os.environ['PATH'] = os.pathsep.join(clean_paths)
 
-# C-API Initialized safely within isolated namespace
-import ctypes
-
+# Phase 4: C-API Isolation and Win32 Directory Hardening
 if sys.platform.startswith('win'):
     try:
         ctypes.windll.kernel32.SetDefaultDllDirectories(0x00001000)
     except Exception:
         pass
 
-    inject_paths = [$PythonInjectPathsStr]
-    
-    # CRITICAL: Explicitly whitelist the MEIPASS root for standard MSVC dependencies
     resolved_paths = [base_dir]
     try:
         os.add_dll_directory(base_dir)
     except Exception:
         pass
-    
+
+    inject_paths = [$PythonInjectPathsStr]
+
     for p in inject_paths:
         target = os.path.join(base_dir, os.path.normpath(p))
         if os.path.exists(target):
@@ -450,18 +454,22 @@ if ($CollectAllPkgs.Count -gt 0) {
 $HiddenImportsStr = $HiddenImports -join "', '"
 if ($HiddenImportsStr) { $HiddenImportsStr = "'$HiddenImportsStr'" }
 
+# Explicitly map the hermetic site-packages to pathex
 $SpecPathex = @($Config.SpecPathex)
-$SpecPathexCode = ""
+$PathArray = @()
+$SitePackages = Join-Path $EnvDir "Lib\site-packages"
+if (Test-Path $SitePackages) {
+    $PathArray += "'$($SitePackages -replace '\\', '/')'"
+}
 if ($SpecPathex.Count -gt 0) {
-    $PathArray = @()
     foreach ($p in $SpecPathex) {
         $fullPath = Join-Path $EnvDir $p
         if (Test-Path $fullPath) {
             $PathArray += "'$($fullPath -replace '\\', '/')'"
         }
     }
-    $SpecPathexCode = $PathArray -join ", "
 }
+$SpecPathexCode = $PathArray -join ", "
 
 $ExplicitBinaries = @($Config.ExplicitBinaries)
 $BinariesList = @()
@@ -502,12 +510,7 @@ if ($ExplicitDatas.Count -gt 0) {
 }
 $DatasStr = $DatasList -join ", "
 
-$HookInjection = ""
-if (-Not ($TargetBackend -match "Standard Application")) {
-    $HookInjection = "runtime_hooks=['$($HookPath -replace '\\', '/')'],"
-} else {
-    $HookInjection = "runtime_hooks=[],"
-}
+$HookInjection = "runtime_hooks=['$($HookPath -replace '\\', '/')'],"
 
 if ($TargetFormat -eq "OneFile") {
     $ExeParams = @"
