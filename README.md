@@ -1,0 +1,2 @@
+# encapsolator
+windows python encapsulation. 
