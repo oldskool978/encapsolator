@@ -105,20 +105,16 @@ $Config = @{
 switch ($Profile) {
     "ROCM" {
         $Config.BackendString = "AMD ROCm Target ($LLVMTarget/HIP)"
-        $GfxUrlParam = "$LLVMTarget-all"
         
-        if ($LLVMTarget -eq "gfx120X") {
-            $GfxPkgName = "_rocm_sdk_libraries_$($LLVMTarget)_all"
-            $Config.PipCommands = @(
-                "install --index-url https://rocm.nightlies.amd.com/v2-staging/$GfxUrlParam/ --pre -U `"rocm[libraries,devel]`" --no-build-isolation --no-cache-dir --no-warn-script-location",
-                "install --index-url https://rocm.nightlies.amd.com/v2-staging/$GfxUrlParam/ --pre -U torch torchaudio torchvision --no-cache-dir --no-warn-script-location"
-            )
-        } else {
-            $GfxPkgName = "rocm_sdk_libraries"
-            $Config.PipCommands = @(
-                "install --index-url https://download.pytorch.org/whl/rocm6.1 -U torch torchvision torchaudio --no-cache-dir --no-warn-script-location"
-            )
-        }
+        # Unified Windows ROCm Pipeline: Upstream PyTorch does NOT host Windows ROCm binaries.
+        # We must strictly utilize the dynamic LLVM architecture target against the AMD staging matrix.
+        $GfxUrlParam = "$LLVMTarget-all"
+        $GfxPkgName  = "_rocm_sdk_libraries_$($LLVMTarget)_all"
+        
+        $Config.PipCommands = @(
+            "install --index-url https://rocm.nightlies.amd.com/v2-staging/$GfxUrlParam/ --pre -U `"rocm[libraries,devel]`" --no-build-isolation --no-cache-dir --no-warn-script-location",
+            "install --index-url https://rocm.nightlies.amd.com/v2-staging/$GfxUrlParam/ --pre -U torch torchaudio torchvision --no-cache-dir --no-warn-script-location"
+        )
         
         $Config.LauncherInjectPaths = @(
             "$PayloadNamespace\$GfxPkgName\bin",
