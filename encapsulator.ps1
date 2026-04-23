@@ -291,6 +291,55 @@ if ($PipCommands.Count -gt 0) {
 Write-Host "`nInitializing Phase 4: Polymorphic AST Encapsulation..." -ForegroundColor Yellow
 Invoke-Strict { & $PythonExe -m pip install pyinstaller --no-cache-dir --no-warn-script-location }
 
+Write-Host "[INFO] Autonomously harvesting dynamic software dependencies..." -ForegroundColor DarkGray
+$HarvesterPath = Join-Path $WorkingRoot "harvester.py"
+$HarvesterContent = @"
+import os
+import sys
+import importlib.metadata as metadata
+
+reqs = set()
+req_path = os.path.join(r'$($WorkingRoot -replace '\\', '\\\\')', 'requirements.txt')
+if os.path.exists(req_path):
+    with open(req_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            # Defensively split away operators and package [extras]
+            req = line.split('==')[0].split('>=')[0].split('~=')[0].split('<')[0].split('>')[0].split('[')[0].strip().lower()
+            if req:
+                reqs.add(req)
+
+imports_to_collect = set()
+for dist in metadata.distributions():
+    dist_name = dist.metadata.get('Name')
+    if dist_name and dist_name.lower() in reqs:
+        top_level_txt = dist.read_text('top_level.txt')
+        if top_level_txt:
+            for tl in top_level_txt.splitlines():
+                if tl.strip():
+                    imports_to_collect.add(tl.strip())
+        else:
+            imports_to_collect.add(dist_name.replace('-', '_'))
+
+print(';'.join(imports_to_collect))
+"@
+Set-Content -Path $HarvesterPath -Value $HarvesterContent -Force
+$DynamicPkgsRaw = & $PythonExe $HarvesterPath
+Remove-Item $HarvesterPath -Force
+
+$CollectAllPkgs = @($Config.PyInstallerCollectAll)
+if ($DynamicPkgsRaw) {
+    $DynamicPkgs = $DynamicPkgsRaw -split ";"
+    foreach ($pkg in $DynamicPkgs) {
+        if ($pkg -notin $CollectAllPkgs) {
+            $CollectAllPkgs += $pkg
+            Write-Host " -> Dynamic Target Locked: $pkg" -ForegroundColor DarkCyan
+        }
+    }
+}
+
 $AppName = [System.IO.Path]::GetFileNameWithoutExtension($TargetScript)
 $DeploymentDir = Join-Path $WorkingRoot "Deploy_$AppName"
 if (Test-Path $DeploymentDir) { Remove-Item $DeploymentDir -Recurse -Force }
@@ -304,7 +353,6 @@ $InjectPaths = @($Config.LauncherInjectPaths)
 $PythonInjectPaths = @()
 foreach ($p in $InjectPaths) {
     $cleanPath = $p
-    # Unconditional strip to align with sys._MEIPASS root mapping
     if ($p -match "^$EscapedNamespace[\\/](.*)") {
         $cleanPath = $matches[1]
     }
@@ -358,7 +406,7 @@ if sys.platform.startswith('win'):
 
     inject_paths = [$PythonInjectPathsStr]
     
-    # CRITICAL: We must explicitly whitelist the MEIPASS root for standard MSVC dependencies
+    # CRITICAL: Explicitly whitelist the MEIPASS root for standard MSVC dependencies
     resolved_paths = [base_dir]
     try:
         os.add_dll_directory(base_dir)
@@ -386,7 +434,6 @@ except Exception:
 "@
 Set-Content -Path $HookPath -Value $HookContent -Force
 
-$CollectAllPkgs = @($Config.PyInstallerCollectAll)
 $HiddenImports = @($Config.PyInstallerHiddenImports)
 
 $CollectAllCode = ""
