@@ -126,7 +126,7 @@ while ($Step -lt 5) {
                 "NVIDIA CUDA 12.1 (PyTorch Default)",
                 "NVIDIA CUDA 11.8 (Legacy Compute)",
                 "Intel OneAPI XPU (Arc/Core Ultra)",
-                "AMD ROCm Nightly (Dynamic LLVM/HIP)",
+                "AMD ROCm Target (Dynamic LLVM/HIP)",
                 "Agnostic / CPU Fallback",
                 $BackOpt,
                 $ExitOpt
@@ -140,7 +140,7 @@ while ($Step -lt 5) {
                 "NVIDIA CUDA 12.1 (PyTorch Default)" { $SelectedProfile = "CUDA_12" }
                 "NVIDIA CUDA 11.8 (Legacy Compute)" { $SelectedProfile = "CUDA_11" }
                 "Intel OneAPI XPU (Arc/Core Ultra)" { $SelectedProfile = "INTEL_XPU" }
-                "AMD ROCm Nightly (Dynamic LLVM/HIP)" { $SelectedProfile = "ROCM" }
+                "AMD ROCm Target (Dynamic LLVM/HIP)" { $SelectedProfile = "ROCM" }
                 "Agnostic / CPU Fallback" { $SelectedProfile = "CPU" }
             }
         }
@@ -158,9 +158,15 @@ while ($Step -lt 5) {
                 Write-Host "[INFO] Executing hardware_probe.ps1 telemetry node..." -ForegroundColor DarkGray
                 $ConfigRaw = & $ProbePath
             }
+            
+            if ([string]::IsNullOrWhiteSpace($ConfigRaw)) {
+                throw "Telemetry node emitted empty pipeline. Ensure hardware_probe.ps1 outputs raw JSON to stdout."
+            }
+            
             $Config = $ConfigRaw | ConvertFrom-Json
         } catch {
-            Write-Host "[ERROR] Failed to parse HAL JSON payload from hardware_probe.ps1." -ForegroundColor Red
+            Write-Host "`n[ERROR] Failed to parse HAL JSON payload from hardware_probe.ps1." -ForegroundColor Red
+            Write-Host "Diagnostic: $_" -ForegroundColor Yellow
             exit 1
         }
         
@@ -235,6 +241,9 @@ Write-Host "Runtime    : " -NoNewline; Write-Host $TargetRuntime -ForegroundColo
 Write-Host "Backend    : " -NoNewline; Write-Host $TargetBackend -ForegroundColor Cyan
 Write-Host "Format     : " -NoNewline; Write-Host $TargetFormat -ForegroundColor Cyan
 Write-Host "GC Policy  : " -NoNewline; Write-Host $TeardownPolicy -ForegroundColor Cyan
+
+$RequirementsPath = Join-Path $WorkingRoot "requirements.txt"
+
 Write-Host "`nInitializing Phase 2: Environment Acquisition..." -ForegroundColor Yellow
 
 $EnvDir = Join-Path $WorkingRoot "build_env_$TargetRuntime"
@@ -264,7 +273,6 @@ Invoke-Strict { & $PythonExe -m pip install wheel setuptools --upgrade --no-cach
 
 Write-Host "`nInitializing Phase 3: HAL JSON Hydration Routing..." -ForegroundColor Yellow
 
-$RequirementsPath = Join-Path $WorkingRoot "requirements.txt"
 $PipCommands = @($Config.PipCommands)
 if ($PipCommands.Count -gt 0) {
     foreach ($cmd in $PipCommands) {
@@ -301,7 +309,6 @@ import sys
 import os
 from modulefinder import ModuleFinder
 
-# Establish deterministic resolution bound to the hermetic site-packages
 site_packages = [p for p in sys.path if 'site-packages' in p]
 entry_point = r'$TargetScriptPathEscaped'
 
@@ -309,7 +316,7 @@ finder = ModuleFinder(path=sys.path)
 try:
     finder.run_script(entry_point)
 except Exception:
-    pass # Tolerate syntax anomalies in unexecuted branches during AST trace
+    pass 
 
 dynamic_imports = set()
 for name, mod in finder.modules.items():
@@ -339,6 +346,17 @@ $AppName = [System.IO.Path]::GetFileNameWithoutExtension($TargetScript)
 $DeploymentDir = Join-Path $WorkingRoot "Deploy_$AppName"
 if (Test-Path $DeploymentDir) { Remove-Item $DeploymentDir -Recurse -Force }
 New-Item -ItemType Directory -Path $DeploymentDir | Out-Null
+
+# --- ZERO-CONFIGURATION ICON DISCOVERY ---
+$IconParam = "None"
+$IconFiles = @(Get-ChildItem -Path $WorkingRoot -Filter "*.ico")
+if ($IconFiles.Count -gt 0) {
+    # If multiple icons exist, grab the first one deterministically
+    $IconPath = $IconFiles[0].FullName -replace '\\', '/'
+    $IconParam = "'$IconPath'"
+    Write-Host "[INFO] Custom Icon Discovered and Bound: $($IconFiles[0].Name)" -ForegroundColor DarkGray
+}
+# -----------------------------------------
 
 $SpecPath = Join-Path $WorkingRoot "$AppName.spec"
 $PayloadNamespace = ".venv"
@@ -375,20 +393,16 @@ import os
 import sys
 import ctypes
 
-# Phase 1: Host Environment Annihilation
 for key in ('PYTHONHOME', 'PYTHONPATH', 'PEP_582_PACKAGES'):
     os.environ.pop(key, None)
 
-# Abstracted Base Directory Resolution
 base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 
-# Phase 2: sys.path truncation locking execution to the payload namespace
 sys.path = [
     p for p in sys.path 
     if p.startswith(base_dir) or 'base_library.zip' in p
 ]
 
-# Phase 3: Strict Host Path Sanitization with Quote Stripping
 if 'PATH' in os.environ:
     clean_paths = []
     for path_segment in os.environ['PATH'].split(os.pathsep):
@@ -402,7 +416,6 @@ if 'PATH' in os.environ:
     
     os.environ['PATH'] = os.pathsep.join(clean_paths)
 
-# Phase 4: C-API Isolation and Win32 Directory Hardening
 if sys.platform.startswith('win'):
     try:
         ctypes.windll.kernel32.SetDefaultDllDirectories(0x00001000)
@@ -454,7 +467,6 @@ if ($CollectAllPkgs.Count -gt 0) {
 $HiddenImportsStr = $HiddenImports -join "', '"
 if ($HiddenImportsStr) { $HiddenImportsStr = "'$HiddenImportsStr'" }
 
-# Explicitly map the hermetic site-packages to pathex
 $SpecPathex = @($Config.SpecPathex)
 $PathArray = @()
 $SitePackages = Join-Path $EnvDir "Lib\site-packages"
@@ -531,6 +543,7 @@ if ($TargetFormat -eq "OneFile") {
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=$IconParam,
 "@
     $CollectBlock = ""
 } else {
@@ -549,6 +562,7 @@ if ($TargetFormat -eq "OneFile") {
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=$IconParam,
     contents_directory='$PayloadNamespace',
 "@
     $CollectBlock = @"
