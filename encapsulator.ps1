@@ -171,6 +171,18 @@ while ($Step -lt 5) {
         }
         
         $TargetBackend = $Config.BackendString
+
+        # --- ARCHITECTURAL FAIL-FAST VALIDATION ---
+        if ($TargetBackend -match "gfx120X" -and $TargetRuntime -match "^3\.9") {
+            Clear-Host
+            Write-Host "`n[FATAL ARCHITECTURAL COLLISION]" -ForegroundColor Red
+            Write-Host "You are attempting to compile a bleeding-edge AMD RDNA 4/3.5 (gfx120X) matrix using a Legacy Python 3.9 runtime." -ForegroundColor Yellow
+            Write-Host "The AMD v2-staging repository utilizes modern Python 3.10+ syntax (PEP 604) in its build hooks." -ForegroundColor Gray
+            Write-Host "Aborting to prevent guaranteed pipeline fracture. Please select Python 3.10 or higher." -ForegroundColor Gray
+            exit 1
+        }
+        # ------------------------------------------
+
         $Step = 3
     }
 
@@ -347,16 +359,13 @@ $DeploymentDir = Join-Path $WorkingRoot "Deploy_$AppName"
 if (Test-Path $DeploymentDir) { Remove-Item $DeploymentDir -Recurse -Force }
 New-Item -ItemType Directory -Path $DeploymentDir | Out-Null
 
-# --- ZERO-CONFIGURATION ICON DISCOVERY ---
 $IconParam = "None"
 $IconFiles = @(Get-ChildItem -Path $WorkingRoot -Filter "*.ico")
 if ($IconFiles.Count -gt 0) {
-    # If multiple icons exist, grab the first one deterministically
     $IconPath = $IconFiles[0].FullName -replace '\\', '/'
     $IconParam = "'$IconPath'"
     Write-Host "[INFO] Custom Icon Discovered and Bound: $($IconFiles[0].Name)" -ForegroundColor DarkGray
 }
-# -----------------------------------------
 
 $SpecPath = Join-Path $WorkingRoot "$AppName.spec"
 $PayloadNamespace = ".venv"
