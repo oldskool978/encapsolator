@@ -3,7 +3,7 @@
 ## Overview
 "Encapsulator" is a zero-configuration deployment toolchain designed to transform Python-based machine learning applications into hermetic, fully portable deployable artifacts. 
 
-It solves intends to simplify distributing of hardware-accelerated applications (e.g., AMD ROCm, NVIDIA CUDA) by completely encapsulating both the Python runtime and dynamic C++ dependency matrix. The resulting deployment executes flawlessly on target machines as a **fully autonomous executable**, without requiring the end user to install external runtimes, SDKs, or system-level dependencies.
+It intends to simplify distributing of hardware-accelerated applications (e.g., AMD ROCm, NVIDIA CUDA) by completely encapsulating both the Python runtime and dynamic C++ dependency matrix. The resulting deployment executes flawlessly on target machines as a **fully autonomous executable**, without requiring the end user to install external runtimes, SDKs, or system-level dependencies.
 
 ## Encapsulation Guide
 Encapsulation is structurally automated and driven entirely by an interactive terminal UI. **No complex command-line flags, arguments, or manual configuration files are required.**
