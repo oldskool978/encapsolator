@@ -301,12 +301,12 @@ if ($PipCommands.Count -gt 0) {
 
     if (Test-Path $RequirementsPath) {
         Write-Host "[INFO] Executing constrained hardware resolution against requirements.txt..."
-        Invoke-Strict { & $PythonExe -m pip install -r $RequirementsPath -c $ConstraintsFile --no-cache-dir --no-warn-script-location }
+        Invoke-Strict { & $PythonExe -m pip install -r $RequirementsPath -c $ConstraintsFile --pre -U --no-cache-dir --no-warn-script-location }
     }
 } else {
     Write-Host "[INFO] Standard Application Mode. Bypassing Hardware Matrices." -ForegroundColor DarkGray
     if (Test-Path $RequirementsPath) {
-        Invoke-Strict { & $PythonExe -m pip install -r $RequirementsPath --no-cache-dir --no-warn-script-location }
+        Invoke-Strict { & $PythonExe -m pip install -r $RequirementsPath --pre -U --no-cache-dir --no-warn-script-location }
     }
 }
 
